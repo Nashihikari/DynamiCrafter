@@ -179,6 +179,7 @@ class DDPM(pl.LightningModule):
         else:
             raise NotImplementedError("mu not supported")
         # TODO how to choose this term
+        # replace the first index with the second index
         lvlb_weights[0] = lvlb_weights[1]
         self.register_buffer('lvlb_weights', lvlb_weights, persistent=False)
         assert not torch.isnan(self.lvlb_weights).all()
@@ -774,17 +775,11 @@ class LatentDiffusion(DDPM):
                 无论用在哪里 loss应该都是一样的
                 loss_simple: MSE loss between target noise and model output
                 loss_vlb: loss KL between q_mean, q_var, p_mean, p_var
+                in this implement, we pass the option of future frame prediction with frame_cond param
                 
         '''
         noise = default(noise, lambda: torch.randn_like(x_start))
         x_t = self.q_sample(x_start=x_start, t=t, noise=noise)
-        # if self.frame_cond:
-        #     if self.cond_mask.device is not self.device:
-        #         self.cond_mask = self.cond_mask.to(self.device)
-        #     ## condition on fist few frames
-        #     x_noisy = x_start * self.cond_mask + (1. - self.cond_mask) * x_noisy
-        # !: 
-        
         loss_dict = {}
 
         prefix = 'train' if self.training else 'val'
@@ -813,6 +808,7 @@ class LatentDiffusion(DDPM):
             assert model_output.shape == (B, F, C * 2, *x_t.shape[3:])
             # !!!
             # TODO: 确认是否生成的是 [model_output, model_var_values]，可能和latte的输出不同，会是其他维度*2，而不是channel维度*2
+            # 看起来不是，需要额外finetune
             model_output, model_var_values = torch.split(model_output, C, dim=2)
             frozen_out = torch.cat([model_output.detach(), model_var_values], dim=2)
             loss_dict["vb"] = self._vb_terms_bpd(
@@ -829,7 +825,6 @@ class LatentDiffusion(DDPM):
             loss_dict["mse"] = mean_flat((target - model_output) ** 2)
 
             loss = loss_dict["mse"] + loss_dict["vb"]
-
         elif self.loss_type == 'MSE' or 'l2':
             # loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3, 4])
             model_output = self.apply_model(x_t, t, cond, **kwargs)
@@ -849,37 +844,6 @@ class LatentDiffusion(DDPM):
             raise NotImplementedError(self.loss_type)
         
         return loss, loss_dict
-        
-
-        # if torch.isnan(loss_simple).any():
-        #     print(f"loss_simple exists nan: {loss_simple}")
-        #     # import pdb; pdb.set_trace()
-        #     for i in range(loss_simple.shape[0]):
-        #         if torch.isnan(loss_simple[i]).any():
-        #             loss_simple[i] = torch.zeros_like(loss_simple[i])
-
-        # loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
-
-        # if self.logvar.device is not self.device:
-        #     self.logvar = self.logvar.to(self.device)
-        # logvar_t = self.logvar[t]
-        # # logvar_t = self.logvar[t.item()].to(self.device) # device conflict when ddp shared
-        # loss = loss_simple / torch.exp(logvar_t) + logvar_t
-        # # loss = loss_simple / torch.exp(self.logvar) + self.logvar
-        # if self.learn_logvar:
-        #     loss_dict.update({f'{prefix}/loss_gamma': loss.mean()})
-        #     loss_dict.update({'logvar': self.logvar.data.mean()})
-
-        # loss = self.l_simple_weight * loss.mean()
-
-        # if self.original_elbo_weight > 0:
-        #     loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3, 4))
-        #     loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
-        #     loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
-        #     loss += (self.original_elbo_weight * loss_vlb)
-        # loss_dict.update({f'{prefix}/loss': loss})
-
-        
 
     def get_loss():
 
