@@ -20,7 +20,13 @@ import pytorch_lightning as pl
 from utils.utils import instantiate_from_config
 from lvdm.ema import LitEma
 from lvdm.distributions import DiagonalGaussianDistribution
-from lvdm.models.utils_diffusion import make_beta_schedule, rescale_zero_terminal_snr
+from lvdm.models.utils_diffusion import (
+    make_beta_schedule,
+    rescale_zero_terminal_snr, 
+    normal_kl,
+    mean_flat,
+    discretized_gaussian_log_likelihood,
+    )
 from lvdm.basics import disabled_train
 from lvdm.common import (
     extract_into_tensor,
@@ -29,6 +35,7 @@ from lvdm.common import (
     default
 )
 import random
+import pdb
 
 __conditioning_keys__ = {'concat': 'c_concat',
                          'crossattn': 'c_crossattn',
@@ -103,7 +110,7 @@ class DDPM(pl.LightningModule):
 
         self.register_schedule(given_betas=given_betas, beta_schedule=beta_schedule, timesteps=timesteps,
                                linear_start=linear_start, linear_end=linear_end, cosine_s=cosine_s)
-
+        # hybrid, MSE/l2, KL
         self.loss_type = loss_type
 
         self.learn_logvar = learn_logvar
@@ -242,6 +249,10 @@ class DDPM(pl.LightningModule):
         )
 
     def q_posterior(self, x_start, x_t, t):
+        '''
+        Compute the mean and variance of the diffusion posterior:
+            q(x_{t-1} | x_t, x_0)
+        '''
         posterior_mean = (
                 extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start +
                 extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
@@ -250,7 +261,8 @@ class DDPM(pl.LightningModule):
         posterior_log_variance_clipped = extract_into_tensor(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def p_mean_variance(self, x, t, clip_denoised: bool):
+    # TODO!: ORIGINAL p_mean_variance
+    def p_mean_variance_1(self, x, t, clip_denoised: bool):
         model_out = self.model(x, t)
         if self.parameterization == "eps":
             x_recon = self.predict_start_from_noise(x, t=t, noise=model_out)
@@ -589,30 +601,66 @@ class LatentDiffusion(DDPM):
         return denoise_grid
 
 
-    def p_mean_variance(self, x, c, t, clip_denoised: bool, return_x0=False, score_corrector=None, corrector_kwargs=None, **kwargs):
+    def p_mean_variance(self, x, c, t, 
+                        clip_denoised: bool, return_x0=False, score_corrector=None, corrector_kwargs=None, 
+                        **kwargs):
+        """
+        Apply the model to get p(x_{t-1} | x_t), as well as a prediction of
+        the initial x, x_0.
+        :param model: the model, which takes a signal and a batch of timesteps
+                      as input.
+        :param x: the [N x C x ...] tensor at time t.
+        :param t: a 1-D Tensor of timesteps.
+        :param clip_denoised: if True, clip the denoised signal into [-1, 1].
+        :param denoised_fn: if not None, a function which applies to the
+            x_start prediction before it is used to sample. Applies before
+            clip_denoised.
+        :param model_kwargs: if not None, a dict of extra keyword arguments to
+            pass to the model. This can be used for conditioning.
+        :return: a dict with the following keys:
+                 - 'mean': the model mean output.
+                 - 'variance': the model variance output.
+                 - 'log_variance': the log of 'variance'.
+                 - 'pred_xstart': the prediction for x_0.
+        """
+        B, F, C = x.shape[:3]
         t_in = t
         model_out = self.apply_model(x, t_in, c, **kwargs)
 
+        # !!:score_corrector means?
         if score_corrector is not None:
             assert self.parameterization == "eps"
             model_out = score_corrector.modify_score(self, model_out, x, t, c, **corrector_kwargs)
 
         if self.parameterization == "eps":
-            x_recon = self.predict_start_from_noise(x, t=t, noise=model_out)
+            pred_xstart = self.predict_start_from_noise(x, t=t, noise=model_out)
         elif self.parameterization == "x0":
-            x_recon = model_out
+            pred_xstart = model_out
         else:
             raise NotImplementedError()
 
+        # ?: Latte with denoised_fn?
         if clip_denoised:
-            x_recon.clamp_(-1., 1.)
+            pred_xstart.clamp_(-1., 1.)
 
-        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
+        # predict mean, variance, log variance
+        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=pred_xstart, x_t=x, t=t)
+        # TODO: iddpm, learned posterior variance, should add model_var_type in params
+        if self.model_var_type == 'learned':
+            model_output, model_var_values = torch.split(model_output, C, dim=2)
+            min_log = extract_into_tensor(self.posterior_log_variance_clipped, t, x.shape)
+            max_log = extract_into_tensor(np.log(self.betas), t, x.shape)
+            # The model_var_values is [-1, 1] for [min_var, max_var].
+            frac = (model_var_values + 1) / 2
+            # !: iddpm的后验方差
+            posterior_log_variance = frac * max_log + (1 - frac) * min_log
+            posterior_variance = torch.exp(posterior_log_variance)
 
         if return_x0:
-            return model_mean, posterior_variance, posterior_log_variance, x_recon
+            return model_mean, posterior_variance, posterior_log_variance, pred_xstart
         else:
             return model_mean, posterior_variance, posterior_log_variance
+
 
     @torch.no_grad()
     def p_sample(self, x, c, t, clip_denoised=False, repeat_noise=False, return_x0=False, \
@@ -635,6 +683,7 @@ class LatentDiffusion(DDPM):
             return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise, x0
         else:
             return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
+        
 
     @torch.no_grad()
     def p_sample_loop(self, cond, shape, return_intermediates=False, x_T=None, verbose=True, callback=None, \
@@ -683,22 +732,68 @@ class LatentDiffusion(DDPM):
             return img, intermediates
         return img
 
+
+    def _vb_terms_bpd(
+            self, model, x_start, x_t, t, clip_denoised=True, model_kwargs=None
+    ):
+        """
+        Get a term for the variational lower-bound.
+        The resulting units are bits (rather than nats, as one might expect).
+        This allows for comparison to other papers.
+        :return: a dict with the following keys:
+                 - 'output': a shape [N] tensor of NLLs or KLs.
+                    At the first timestep return the decoder NLL，otherwise return KL
+                 - 'pred_xstart': the x_0 predictions.
+        """
+        true_mean, _, true_log_variance_clipped = self.q_posterior(
+            x_start=x_start, x_t=x_t, t=t
+        )
+        out = self.p_mean_variance(
+            model, x_t, t, clip_denoised=clip_denoised, model_kwargs=model_kwargs
+        )
+        kl = normal_kl(
+            true_mean, true_log_variance_clipped, out["mean"], out["log_variance"]
+        )
+        kl = mean_flat(kl) / np.log(2.0)
+
+        decoder_nll = -discretized_gaussian_log_likelihood(
+            x_start, means=out["mean"], log_scales=0.5 * out["log_variance"]
+        )
+        assert decoder_nll.shape == x_start.shape
+        decoder_nll = mean_flat(decoder_nll) / np.log(2.0)
+
+        # At the first timestep return the decoder NLL,
+        # otherwise return KL(q(x_{t-1}|x_t,x_0) || p(x_{t-1}|x_t))
+        output = torch.where((t == 0), decoder_nll, kl)
+        return {"output": output, "pred_xstart": out["pred_xstart"]}
+
+
     def p_losses(self, x_start, cond, t, noise=None, **kwargs):
+        '''
+            If trainning with way of iddpm:
+                无论用在哪里 loss应该都是一样的
+                loss_simple: MSE loss between target noise and model output
+                loss_vlb: loss KL between q_mean, q_var, p_mean, p_var
+                
+        '''
         noise = default(noise, lambda: torch.randn_like(x_start))
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        x_t = self.q_sample(x_start=x_start, t=t, noise=noise)
         # if self.frame_cond:
         #     if self.cond_mask.device is not self.device:
         #         self.cond_mask = self.cond_mask.to(self.device)
         #     ## condition on fist few frames
         #     x_noisy = x_start * self.cond_mask + (1. - self.cond_mask) * x_noisy
-        model_output = self.apply_model(x_noisy, t, cond, **kwargs)
-
+        # !: 
+        
         loss_dict = {}
+
         prefix = 'train' if self.training else 'val'
 
         if self.parameterization == "x0":
             target = x_start
         elif self.parameterization == "eps":
+            target = noise
+        elif self.parameterization == "v":
             target = noise
         else:
             raise NotImplementedError()
@@ -707,39 +802,88 @@ class LatentDiffusion(DDPM):
         #     ## [b,c,t,h,w]: only care about the predicted part (avoid disturbance)
         #     model_output = model_output[:, :, self.frame_cond:, :, :]
         #     target = target[:, :, self.frame_cond:, :, :]
+        pdb.set_trace()
 
-        loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3, 4])
+        # choose loss type: hybrid / simple loss
+        # hybrid = MSE + KL * 1/1000
+        if self.loss_type == 'hybrid':
+            model_output = self.apply_model(x_t, t, cond, **kwargs)
 
-        if torch.isnan(loss_simple).any():
-            print(f"loss_simple exists nan: {loss_simple}")
-            # import pdb; pdb.set_trace()
-            for i in range(loss_simple.shape[0]):
-                if torch.isnan(loss_simple[i]).any():
-                    loss_simple[i] = torch.zeros_like(loss_simple[i])
+            B, F, C = x_t.shape[:3]
+            assert model_output.shape == (B, F, C * 2, *x_t.shape[3:])
+            # !!!
+            # TODO: 确认是否生成的是 [model_output, model_var_values]，可能和latte的输出不同，会是其他维度*2，而不是channel维度*2
+            model_output, model_var_values = torch.split(model_output, C, dim=2)
+            frozen_out = torch.cat([model_output.detach(), model_var_values], dim=2)
+            loss_dict["vb"] = self._vb_terms_bpd(
+                    model=lambda *args, r=frozen_out: r,
+                    x_start=x_start,
+                    x_t=x_t,
+                    t=t,
+                    clip_denoised=False,
+            )["output"]
 
-        loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
+            # using a factor of 1/1000, balance the KL loss and MSE loss
+            loss_dict["vb"] *= self.num_timesteps / 1000.0
 
-        if self.logvar.device is not self.device:
-            self.logvar = self.logvar.to(self.device)
-        logvar_t = self.logvar[t]
-        # logvar_t = self.logvar[t.item()].to(self.device) # device conflict when ddp shared
-        loss = loss_simple / torch.exp(logvar_t) + logvar_t
-        # loss = loss_simple / torch.exp(self.logvar) + self.logvar
-        if self.learn_logvar:
-            loss_dict.update({f'{prefix}/loss_gamma': loss.mean()})
-            loss_dict.update({'logvar': self.logvar.data.mean()})
+            loss_dict["mse"] = mean_flat((target - model_output) ** 2)
 
-        loss = self.l_simple_weight * loss.mean()
+            loss = loss_dict["mse"] + loss_dict["vb"]
 
-        if self.original_elbo_weight > 0:
-            loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3, 4))
-            loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
-            loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
-            loss += (self.original_elbo_weight * loss_vlb)
-        loss_dict.update({f'{prefix}/loss': loss})
+        elif self.loss_type == 'MSE' or 'l2':
+            # loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3, 4])
+            model_output = self.apply_model(x_t, t, cond, **kwargs)
+            B, C, F = x_t.shape[:3]
+            # TODO: debuging 
+            if model_output.shape == (B, C * 2, F, *x_t.shape[3:]):
+                model_output, model_var_values = torch.split(model_output, C, dim=2)
+                loss_dict["mse"] = mean_flat((target - model_output) ** 2)
+                loss = loss_dict["mse"]
+            else:
+                loss_dict["mse"] = mean_flat((target - model_output) ** 2)
+                loss = loss_dict["mse"]
 
+        elif self.loss_type == 'KL':
+            loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3, 4])
+        else:
+            raise NotImplementedError(self.loss_type)
+        
         return loss, loss_dict
+        
 
+        # if torch.isnan(loss_simple).any():
+        #     print(f"loss_simple exists nan: {loss_simple}")
+        #     # import pdb; pdb.set_trace()
+        #     for i in range(loss_simple.shape[0]):
+        #         if torch.isnan(loss_simple[i]).any():
+        #             loss_simple[i] = torch.zeros_like(loss_simple[i])
+
+        # loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
+
+        # if self.logvar.device is not self.device:
+        #     self.logvar = self.logvar.to(self.device)
+        # logvar_t = self.logvar[t]
+        # # logvar_t = self.logvar[t.item()].to(self.device) # device conflict when ddp shared
+        # loss = loss_simple / torch.exp(logvar_t) + logvar_t
+        # # loss = loss_simple / torch.exp(self.logvar) + self.logvar
+        # if self.learn_logvar:
+        #     loss_dict.update({f'{prefix}/loss_gamma': loss.mean()})
+        #     loss_dict.update({'logvar': self.logvar.data.mean()})
+
+        # loss = self.l_simple_weight * loss.mean()
+
+        # if self.original_elbo_weight > 0:
+        #     loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3, 4))
+        #     loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
+        #     loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
+        #     loss += (self.original_elbo_weight * loss_vlb)
+        # loss_dict.update({f'{prefix}/loss': loss})
+
+        
+
+    def get_loss():
+
+        pass
 
 class LatentVisualDiffusion(LatentDiffusion):
     def __init__(self, img_cond_stage_config, image_proj_stage_config, freeze_embedder=True, *args, **kwargs):
@@ -862,6 +1006,23 @@ class LatentVisualDiffusion(LatentDiffusion):
         #     torch.where(prompt_mask, null_prompt, self.get_learned_conditioning('prompt_xxx').detach())]
         # cond["c_concat"] = [input_mask * self.encode_first_stage((xc["c_concat"].to(self.device))).mode().detach()]
 
+        # TODO: 
+        # nashi - 4/11
+        pdb.set_trace()
+        batch_size, len_frames = x.shape[0], x.shape[2]
+        # TODO: 后续还需要考虑batch的问题，目前是get_input没有batch（实际上可能是几个clip的random frames分别凑在一起，然后做concat
+        repeat_random_frame = random_frame_copy.squeeze(0).permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
+        repeat_random_frame = repeat(repeat_random_frame, 'b c t h w -> b c (repeat t) h w', repeat=len_frames)
+        # repeat_random_frame = random_frame_copy.squeeze(0).permute(2, 0, 1).unsqueeze(0).unsqueeze(2).expand(-1, -1, len_frames, -1, -1).float().to(self.device)
+        
+        repeat_random_frame = (repeat_random_frame / 255. - 0.5) * 2
+        encoder_posterior_img = self.encode_first_stage(repeat_random_frame)
+        # pdb.set_trace()
+        # TODO：当z是tensor的情况下，相当于乘了两个scale_factor
+        # OUTPUT: torch.Size([1, 4, 16, 32, 32])
+        img_concat = self.get_first_stage_encoding(encoder_posterior_img).detach()
+
+
         text_emb = self.get_learned_conditioning([""])
         # img cond
         img_tensor = random_frame_copy.squeeze(0).permute(2, 0, 1).float().to(self.device)
@@ -879,7 +1040,7 @@ class LatentVisualDiffusion(LatentDiffusion):
 
         imtext_cond = torch.cat([text_emb, img_emb], dim=1)
 
-        cond = {"c_crossattn": [imtext_cond], "c_concat": [img_tensor]}
+        cond = {"c_crossattn": [imtext_cond], "c_concat": [img_concat]}
 
         out = [z, cond]
         if return_first_stage_outputs:

@@ -1,0 +1,1 @@
+python train.py --seed 1234 --ckpt ./checkpoints/dynamicrafter_1024_v1/model.ckpt --base ./configs/train_1024_v1.0.yaml --savedir outputs --savefps 10 --ddim_steps 25 --frames 14 --devices 1 data.params.train.params.data_root=./data2 data.params.validation.params.data_root=./data2

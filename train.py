@@ -843,6 +843,18 @@ def get_parser(**parser_kwargs):
         default=False,  # TODO: later default to True
         help="log to wandb",
     )
+
+    # nashi 
+    # parser.add_argument("--devices", type=int, default=1, help="devices num")
+    parser.add_argument("--ddim_steps", type=int, default=25, help="ddim_steps")
+    parser.add_argument("--savedir", type=str, default="output", help="savedir")
+    parser.add_argument("--savefps", type=int, default=10, help="savefps")
+    parser.add_argument("--ckpt", type=str, default="./checkpoints/dynamicrafter_1024_v1/model.ckpt", help="ckpt")
+    parser.add_argument("--frames", type=int, default=14, help="frames")
+    # parser.add_argument("--perframe_ae", action='store_true', default=False, help="if we use per-frame AE decoding, set it to True to save GPU memory, especially for the model of 576x1024")
+
+
+
     if version.parse(torch.__version__) >= version.parse("2.0.0"):
         parser.add_argument(
             "--resume_from_checkpoint",
@@ -851,6 +863,7 @@ def get_parser(**parser_kwargs):
             help="single checkpoint file to resume from",
         )
     default_args = default_trainer_args()
+
     for key in default_args:
         if key == "resume_from_checkpoint":
             continue

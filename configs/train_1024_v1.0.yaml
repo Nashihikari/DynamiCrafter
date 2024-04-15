@@ -1,8 +1,9 @@
 model:
   target: lvdm.models.ddpm3d.LatentVisualDiffusion
+  base_learning_rate: 1e-5
   params:
     rescale_betas_zero_snr: True
-    parameterization: "v"
+    parameterization: "eps"
     linear_start: 0.00085
     linear_end: 0.012
     num_timesteps_cond: 1
