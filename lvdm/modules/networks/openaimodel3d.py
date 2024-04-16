@@ -546,13 +546,14 @@ class UNetModel(nn.Module):
         )
 
     def forward(self, x, timesteps, context=None, features_adapter=None, fs=None, **kwargs):
-        b,_,t,_,_ = x.shape
+        b,_,t,_,_ = x.shape # torch.Size([1, 8, 16, 32, 32])
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False).type(x.dtype)
         emb = self.time_embed(t_emb)
         
         ## repeat t times for context [(b t) 77 768] & time embedding
         ## check if we use per-frame image conditioning
         _, l_context, _ = context.shape
+
         if l_context == 77 + t*16: ## !!! HARD CODE here
             context_text, context_img = context[:,:77,:], context[:,77:,:]
             context_text = context_text.repeat_interleave(repeats=t, dim=0)

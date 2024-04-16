@@ -567,7 +567,7 @@ class LatentDiffusion(DDPM):
                 cond = [cond]
             key = 'c_concat' if self.model.conditioning_key == 'concat' else 'c_crossattn'
             cond = {key: cond}
-
+        pdb.set_trace()
         # test
         print(f'apply_model cond: {cond}')
         x_recon = self.model(x_noisy, t, **cond, **kwargs)
@@ -768,6 +768,16 @@ class LatentDiffusion(DDPM):
         output = torch.where((t == 0), decoder_nll, kl)
         return {"output": output, "pred_xstart": out["pred_xstart"]}
 
+    def get_loss(self, pred, target, mean=True):
+        if self.loss_type == 'l2':
+            if mean:
+                loss = torch.nn.functional.mse_loss(target, pred)
+            else:
+                loss = torch.nn.functional.mse_loss(target, pred, reduction='none')
+        else:
+            raise NotImplementedError("unknown loss type '{loss_type}'")
+
+        return loss
 
     def p_losses(self, x_start, cond, t, noise=None, **kwargs):
         '''
@@ -828,15 +838,41 @@ class LatentDiffusion(DDPM):
         elif self.loss_type == 'MSE' or 'l2':
             # loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3, 4])
             model_output = self.apply_model(x_t, t, cond, **kwargs)
-            B, C, F = x_t.shape[:3]
-            # TODO: debuging 
+            B, C, F = x_t.shape[:3] 
+            # refer to iddpm, but dynamicrafter model trained by ddpm
             if model_output.shape == (B, C * 2, F, *x_t.shape[3:]):
                 model_output, model_var_values = torch.split(model_output, C, dim=2)
                 loss_dict["mse"] = mean_flat((target - model_output) ** 2)
                 loss = loss_dict["mse"]
+            # iddpm
             else:
-                loss_dict["mse"] = mean_flat((target - model_output) ** 2)
-                loss = loss_dict["mse"]
+                loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3, 4])
+                if torch.isnan(loss_simple).any():
+                    print(f"loss_simple exists nan: {loss_simple}")
+                    # import pdb; pdb.set_trace()
+                    for i in range(loss_simple.shape[0]):
+                        if torch.isnan(loss_simple[i]).any():
+                            loss_simple[i] = torch.zeros_like(loss_simple[i])
+                loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
+
+                if self.logvar.device is not self.device:
+                    self.logvar = self.logvar.to(self.device)
+                logvar_t = self.logvar[t]
+                # logvar_t = self.logvar[t.item()].to(self.device) # device conflict when ddp shared
+                loss = loss_simple / torch.exp(logvar_t) + logvar_t
+                # loss = loss_simple / torch.exp(self.logvar) + self.logvar
+                if self.learn_logvar:
+                    loss_dict.update({f'{prefix}/loss_gamma': loss.mean()})
+                    loss_dict.update({'logvar': self.logvar.data.mean()})
+
+                loss = self.l_simple_weight * loss.mean()
+
+                if self.original_elbo_weight > 0:
+                    loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3, 4))
+                    loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
+                    loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
+                    loss += (self.original_elbo_weight * loss_vlb)
+                loss_dict.update({f'{prefix}/loss': loss})
 
         elif self.loss_type == 'KL':
             loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3, 4])
@@ -845,9 +881,7 @@ class LatentDiffusion(DDPM):
         
         return loss, loss_dict
 
-    def get_loss():
 
-        pass
 
 class LatentVisualDiffusion(LatentDiffusion):
     def __init__(self, img_cond_stage_config, image_proj_stage_config, freeze_embedder=True, *args, **kwargs):
@@ -890,7 +924,7 @@ class LatentVisualDiffusion(LatentDiffusion):
             pass
 
         # x, c = self.get_batch_input(batch, random_uncond=random_uncond, is_imgbatch=is_imgbatch)
-        x, c = self.get_input(batch, self.first_stage_key)
+        x, c = self.get_input(batch, random_uncond=random_uncond, is_imgbatch=is_imgbatch)
         loss, loss_dict = self(x, c, is_imgbatch=is_imgbatch, **kwargs)
         return loss, loss_dict
 
@@ -898,6 +932,7 @@ class LatentVisualDiffusion(LatentDiffusion):
     def get_batch_input(self, batch, random_uncond, return_first_stage_outputs=False, return_original_cond=False,
                         is_imgbatch=False):
         ## image/video shape: b, c, t, h, w
+        # TODO: get from img
         data_key = 'jpg' if is_imgbatch else self.first_stage_key
         x = super().get_input(batch, data_key)
         if is_imgbatch:
@@ -939,22 +974,38 @@ class LatentVisualDiffusion(LatentDiffusion):
 
         return out
 
-    def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
+    def get_input(self, batch, k, random_uncond, is_imgbatch, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, bs=None, uncond=0.05):
         # dict(edited=image_1, edit=dict(c_concat=image_0, c_crossattn=prompt))
         # first：edited， cond： edit
-        random_frame = batch['random_frame']
-        random_frame_copy = random_frame.clone()
-        # test
-        print(f'get_input begin random_frame.shape: {random_frame.shape}')
-        x = super().get_input(batch, k)
+        # batch['video', 'caption', 'random_frame', 'jpg']
+        data_key = 'jpg' if is_imgbatch else self.first_stage_key
+        x = super().get_input(batch, data_key)
+        # jpg/image, we load nums of frames images
+        if is_imgbatch:
+            b = x.shape[0] // self.temporal_length
+            x = rearrange(x, '(b t) c h w -> b c t h w', b=b, t=self.temporal_length)
+        x_ori = x
+        x_encode = self.encode_first_stage(x)
+
+        # concat input, 如果是image，concat的东西都弄成当前图像的copy？
+        if not is_imgbatch:
+            random_frame = batch['random_frame']
+            random_frame_copy = random_frame.clone()
+            # test
+            print(f'get_input begin random_frame.shape: {random_frame.shape}')
+        
         if bs is not None:
             x = x[:bs]
+
         x = x.to(self.device)
+        
         encoder_posterior = self.encode_first_stage(x)
         z = self.get_first_stage_encoding(encoder_posterior).detach()
+
         cond_key = cond_key or self.cond_stage_key
         xc = super().get_input(batch, cond_key)
+
         if bs is not None:
             xc["c_crossattn"] = xc["c_crossattn"][:bs]
             xc["c_concat"] = xc["c_concat"][:bs]
@@ -975,10 +1026,11 @@ class LatentVisualDiffusion(LatentDiffusion):
         pdb.set_trace()
         batch_size, len_frames = x.shape[0], x.shape[2]
         # TODO: 后续还需要考虑batch的问题，目前是get_input没有batch（实际上可能是几个clip的random frames分别凑在一起，然后做concat
-        repeat_random_frame = random_frame_copy.squeeze(0).permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
-        repeat_random_frame = repeat(repeat_random_frame, 'b c t h w -> b c (repeat t) h w', repeat=len_frames)
-        # repeat_random_frame = random_frame_copy.squeeze(0).permute(2, 0, 1).unsqueeze(0).unsqueeze(2).expand(-1, -1, len_frames, -1, -1).float().to(self.device)
-        
+        if not is_imgbatch:
+            repeat_random_frame = random_frame_copy.squeeze(0).permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
+            repeat_random_frame = repeat(repeat_random_frame, 'b c t h w -> b c (repeat t) h w', repeat=len_frames)
+        else:
+
         repeat_random_frame = (repeat_random_frame / 255. - 0.5) * 2
         encoder_posterior_img = self.encode_first_stage(repeat_random_frame)
         # pdb.set_trace()
@@ -991,14 +1043,7 @@ class LatentVisualDiffusion(LatentDiffusion):
         # img cond
         img_tensor = random_frame_copy.squeeze(0).permute(2, 0, 1).float().to(self.device)
         img_tensor = (img_tensor / 255. - 0.5) * 2
-        #
-        # image_tensor_resized = transform(img_tensor)  # 3,h,w
-        # videos = image_tensor_resized.unsqueeze(0)  # bchw
-        #
-        # z = get_latent_z(model, videos.unsqueeze(2))  # bc,1,hw
-        #
-        # img_tensor_repeat = repeat(z, 'b c t h w -> b c (repeat t) h w', repeat=frames)
-        #
+
         cond_images = self.embedder(img_tensor.unsqueeze(0))  ## blc
         img_emb = self.image_proj_model(cond_images)
 
