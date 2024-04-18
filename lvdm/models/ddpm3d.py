@@ -320,7 +320,7 @@ class DDPM(pl.LightningModule):
     def get_input(self, batch, k):
         x = batch[k]
         # test
-        print(f'get_input x: {x}, batch: {batch}')
+        # print(f'get_input x: {x}, batch: {batch}')
         # batch的值是{video: tenxxx, caption: ['xxx']} 当取到caption时会报错
         # AttributeError: 'list' object has no attribute 'to'
         # x = x.to(memory_format=torch.contiguous_format).float()
@@ -567,9 +567,9 @@ class LatentDiffusion(DDPM):
                 cond = [cond]
             key = 'c_concat' if self.model.conditioning_key == 'concat' else 'c_crossattn'
             cond = {key: cond}
-        pdb.set_trace()
+        # pdb.set_trace()
         # test
-        print(f'apply_model cond: {cond}')
+        # print(f'apply_model cond: {cond}')
         x_recon = self.model(x_noisy, t, **cond, **kwargs)
 
         if isinstance(x_recon, tuple):
@@ -958,7 +958,7 @@ class LatentVisualDiffusion(LatentDiffusion):
         else:
             cond_emb = self.get_learned_conditioning(cond.to(self.device))
         # test
-        print(f'get_batch_input cond_emb.shape: {cond_emb.shape}')
+        # print(f'get_batch_input cond_emb.shape: {cond_emb.shape}')
         if random_uncond and self.uncond_type == 'zero_embed':
             for i, ci in enumerate(cond):
                 if random.random() < self.uncond_prob:
@@ -974,11 +974,12 @@ class LatentVisualDiffusion(LatentDiffusion):
 
         return out
 
-    def get_input(self, batch, k, random_uncond, is_imgbatch, return_first_stage_outputs=False, force_c_encode=False,
+    def get_input(self, batch, random_uncond, is_imgbatch, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, bs=None, uncond=0.05):
         # dict(edited=image_1, edit=dict(c_concat=image_0, c_crossattn=prompt))
         # first：edited， cond： edit
         # batch['video', 'caption', 'random_frame', 'jpg']
+        # todo: 添加读入jpg的功能
         data_key = 'jpg' if is_imgbatch else self.first_stage_key
         x = super().get_input(batch, data_key)
         # jpg/image, we load nums of frames images
@@ -1000,17 +1001,6 @@ class LatentVisualDiffusion(LatentDiffusion):
 
         x = x.to(self.device)
         
-        encoder_posterior = self.encode_first_stage(x)
-        z = self.get_first_stage_encoding(encoder_posterior).detach()
-
-        cond_key = cond_key or self.cond_stage_key
-        xc = super().get_input(batch, cond_key)
-
-        if bs is not None:
-            xc["c_crossattn"] = xc["c_crossattn"][:bs]
-            xc["c_concat"] = xc["c_concat"][:bs]
-        cond = {}
-
         # # To support classifier-free guidance, randomly drop out only text conditioning 5%, only image conditioning 5%, and both 5%.
         # random = torch.rand(x.size(0), device=x.device)
         # prompt_mask = rearrange(random < 2 * uncond, "n -> n 1 1")
@@ -1023,42 +1013,64 @@ class LatentVisualDiffusion(LatentDiffusion):
 
         # TODO: 
         # nashi - 4/11
-        pdb.set_trace()
+        # image concat
+        # pdb.set_trace()
         batch_size, len_frames = x.shape[0], x.shape[2]
         # TODO: 后续还需要考虑batch的问题，目前是get_input没有batch（实际上可能是几个clip的random frames分别凑在一起，然后做concat
         if not is_imgbatch:
             repeat_random_frame = random_frame_copy.squeeze(0).permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
             repeat_random_frame = repeat(repeat_random_frame, 'b c t h w -> b c (repeat t) h w', repeat=len_frames)
+            repeat_random_frame = (repeat_random_frame / 255. - 0.5) * 2
         else:
+            # is img batch, repeat imgbatch
+            repeat_random_frame = x.clone()
 
-        repeat_random_frame = (repeat_random_frame / 255. - 0.5) * 2
-        encoder_posterior_img = self.encode_first_stage(repeat_random_frame)
-        # pdb.set_trace()
-        # TODO：当z是tensor的情况下，相当于乘了两个scale_factor
+        img_concat = self.encode_first_stage(repeat_random_frame)
         # OUTPUT: torch.Size([1, 4, 16, 32, 32])
-        img_concat = self.get_first_stage_encoding(encoder_posterior_img).detach()
 
+        # todo: add caption
+        cond_key = cond_key or self.cond_stage_key
+        cond_caption = super().get_input(batch, cond_key)
 
-        text_emb = self.get_learned_conditioning([""])
-        # img cond
+        # empty seq
+        if random_uncond and self.uncond_type == 'empty_seq':
+            for i, ci in enumerate(cond_caption):
+                if random.random() < self.uncond_prob:
+                    cond_caption[i] = ""
+        
+
+        cond = {}
+        # preprocess cap_emb
+        if isinstance(cond_caption, dict) or isinstance(cond_caption, list):
+            cap_emb = self.get_learned_conditioning(cond_caption)
+        else:
+            cap_emb = self.get_learned_conditioning(cond_caption.to(self.device))
+        # zero embedding
+        if random_uncond and self.uncond_type == 'zero_embed':
+            for i, ci in enumerate(cond_caption):
+                if random.random() < self.uncond_prob:
+                    cap_emb[i] = torch.zeros_like(ci)
+
+        # img cond, contain 
         img_tensor = random_frame_copy.squeeze(0).permute(2, 0, 1).float().to(self.device)
         img_tensor = (img_tensor / 255. - 0.5) * 2
-
         cond_images = self.embedder(img_tensor.unsqueeze(0))  ## blc
         img_emb = self.image_proj_model(cond_images)
 
-        imtext_cond = torch.cat([text_emb, img_emb], dim=1)
+        # combine cap_emb and img_emb will using for cross-attention
+        imtext_cond = torch.cat([cap_emb, img_emb], dim=1)
 
         cond = {"c_crossattn": [imtext_cond], "c_concat": [img_concat]}
+        out = [x_encode, cond]
 
-        out = [z, cond]
         if return_first_stage_outputs:
-            xrec = self.decode_first_stage(z)
+            xrec = self.decode_first_stage(x_encode)
             out.extend([x, xrec])
         if return_original_cond:
-            out.append(xc)
+            # onlu cond_caption without img_caption
+            out.append(cond_caption)
         # test
-        print(f'get_input out: {out}')
+        # print(f'get_input out: {out}')
         return out
 
     def configure_optimizers(self):
