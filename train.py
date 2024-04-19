@@ -25,6 +25,7 @@ from pytorch_lightning.utilities import rank_zero_only
 
 from utils.utils import instantiate_from_config
 from utils.common_utils import *
+import pdb
 
 MULTINODE_HACKS = True
 
@@ -311,6 +312,7 @@ def run_inference(opt, unknown):
                 print(
                     f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}"
                 )
+            pdb.set_trace()
         except:
             print("datasets not yet initialized.")
 

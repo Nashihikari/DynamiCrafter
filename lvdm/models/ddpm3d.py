@@ -984,8 +984,8 @@ class LatentVisualDiffusion(LatentDiffusion):
         x = super().get_input(batch, data_key)
         # jpg/image, we load nums of frames images
         if is_imgbatch:
-            b = x.shape[0] // self.temporal_length
-            x = rearrange(x, '(b t) c h w -> b c t h w', b=b, t=self.temporal_length)
+            b_ = x.shape[0] // self.temporal_length
+            x = rearrange(x, '(b t) c h w -> b c t h w', b=b_, t=self.temporal_length)
         x_ori = x
         x_encode = self.encode_first_stage(x)
 
@@ -1014,11 +1014,10 @@ class LatentVisualDiffusion(LatentDiffusion):
         # TODO: 
         # nashi - 4/11
         # image concat
-        # pdb.set_trace()
         batch_size, len_frames = x.shape[0], x.shape[2]
         # TODO: 后续还需要考虑batch的问题，目前是get_input没有batch（实际上可能是几个clip的random frames分别凑在一起，然后做concat
         if not is_imgbatch:
-            repeat_random_frame = random_frame_copy.squeeze(0).permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
+            repeat_random_frame = random_frame_copy.permute(0, 3, 1, 2).unsqueeze(2)
             repeat_random_frame = repeat(repeat_random_frame, 'b c t h w -> b c (repeat t) h w', repeat=len_frames)
             repeat_random_frame = (repeat_random_frame / 255. - 0.5) * 2
         else:
@@ -1052,13 +1051,14 @@ class LatentVisualDiffusion(LatentDiffusion):
                     cap_emb[i] = torch.zeros_like(ci)
 
         # img cond, contain 
-        img_tensor = random_frame_copy.squeeze(0).permute(2, 0, 1).float().to(self.device)
+        img_tensor = random_frame_copy.permute(0, 3, 1, 2).float().to(self.device)
         img_tensor = (img_tensor / 255. - 0.5) * 2
         cond_images = self.embedder(img_tensor.unsqueeze(0))  ## blc
         img_emb = self.image_proj_model(cond_images)
 
         # combine cap_emb and img_emb will using for cross-attention
         imtext_cond = torch.cat([cap_emb, img_emb], dim=1)
+        pdb.set_trace()
 
         cond = {"c_crossattn": [imtext_cond], "c_concat": [img_concat]}
         out = [x_encode, cond]

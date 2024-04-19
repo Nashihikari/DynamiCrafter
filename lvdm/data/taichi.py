@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import Dataset
 from decord import VideoReader, cpu
 import glob
+import pdb
 
 class Taichi(Dataset):
     """
@@ -43,6 +44,7 @@ class Taichi(Dataset):
             data_folder = self.data_root
         else:
             data_folder = os.path.join(self.data_root, self.subset_split)
+        # pdb.set_trace()
         self.videos = sum([glob.glob(os.path.join(data_folder, '**', f'*.{ext}'), recursive=True)
                      for ext in self.exts], [])
         print(f'Number of videos = {len(self.videos)}')
@@ -87,3 +89,4 @@ class Taichi(Dataset):
     
     def __len__(self):
         return len(self.videos)
+    

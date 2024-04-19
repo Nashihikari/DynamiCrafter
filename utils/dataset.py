@@ -43,6 +43,8 @@ class DataModuleFromConfig(pl.LightningDataModule):
         self.num_workers = num_workers if num_workers is not None else batch_size * 2
         self.use_worker_init_fn = use_worker_init_fn
         if train is not None:
+            # import pdb
+            # pdb.set_trace()
             self.dataset_configs["train"] = train
             self.train_dataloader = self._train_dataloader
         if validation is not None:

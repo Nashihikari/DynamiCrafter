@@ -105,7 +105,7 @@ model:
 data:
   target: utils.dataset.DataModuleFromConfig
   params:
-    batch_size: 1
+    batch_size: 2
     num_workers: 0
     wrap: false
     train:
