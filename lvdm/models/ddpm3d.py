@@ -739,7 +739,7 @@ class LatentDiffusion(DDPM):
     ):
         """
         Get a term for the variational lower-bound.
-        The resulting units are bits (rather than nats, as one might expect).
+        
         This allows for comparison to other papers.
         :return: a dict with the following keys:
                  - 'output': a shape [N] tensor of NLLs or KLs.
@@ -1037,11 +1037,12 @@ class LatentVisualDiffusion(LatentDiffusion):
                 if random.random() < self.uncond_prob:
                     cond_caption[i] = ""
         
-
         cond = {}
         # preprocess cap_emb
+        # 如果是视频的话，cap_emb是不是直接repeat frames?
+        pdb.set_trace()
         if isinstance(cond_caption, dict) or isinstance(cond_caption, list):
-            cap_emb = self.get_learned_conditioning(cond_caption)
+            cap_emb = self.get_learned_conditioning(cond_caption) # b 77 1024
         else:
             cap_emb = self.get_learned_conditioning(cond_caption.to(self.device))
         # zero embedding
@@ -1051,14 +1052,29 @@ class LatentVisualDiffusion(LatentDiffusion):
                     cap_emb[i] = torch.zeros_like(ci)
 
         # img cond, contain 
-        img_tensor = random_frame_copy.permute(0, 3, 1, 2).float().to(self.device)
-        img_tensor = (img_tensor / 255. - 0.5) * 2
-        cond_images = self.embedder(img_tensor.unsqueeze(0))  ## blc
-        img_emb = self.image_proj_model(cond_images)
+
+        pdb.set_trace()
+
+        if not is_imgbatch: 
+            img_tensor = random_frame_copy.permute(0, 3, 1, 2).float().to(self.device) # torch.Size([2, 3, 256, 256])
+            img_tensor = (img_tensor / 255. - 0.5) * 2
+            cond_images = self.embedder(img_tensor)  ## blc torch.Size([b, 257, 1280])
+            img_emb = self.image_proj_model(cond_images) # torch.Size([2, 16, 1024])
+        else:
+            # 针对要输入 img的
+            img_emb_list = []
+            for i in range(self.temporal_length):
+                # b c t h w
+                img_tensor = repeat_random_frame[:, :, i, :, :]
+                cond_images = self.embedder(img_tensor)  ## blc torch.Size([b, 257, 1280])
+                img_emb = self.image_proj_model(cond_images) # torch.Size([2, 16, 1024])
+                img_emb_list.append(img_emb)
+            img_emb = torch.cat(img_emb_list, dim=1)
+            
 
         # combine cap_emb and img_emb will using for cross-attention
         imtext_cond = torch.cat([cap_emb, img_emb], dim=1)
-        pdb.set_trace()
+        
 
         cond = {"c_crossattn": [imtext_cond], "c_concat": [img_concat]}
         out = [x_encode, cond]

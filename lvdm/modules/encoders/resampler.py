@@ -132,13 +132,16 @@ class Resampler(nn.Module):
             )
 
     def forward(self, x):
+        import pdb
+        pdb.set_trace()
+        # x is image encoded by the CLIP image encoder
         latents = self.latents.repeat(x.size(0), 1, 1) ## B (T L) C
         x = self.proj_in(x)
         
         for attn, ff in self.layers:
             latents = attn(x, latents) + latents
             latents = ff(latents) + latents
-            
+        
         latents = self.proj_out(latents)
         latents = self.norm_out(latents) # B L C or B (T L) C
 

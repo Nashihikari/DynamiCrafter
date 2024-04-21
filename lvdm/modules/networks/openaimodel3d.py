@@ -555,6 +555,8 @@ class UNetModel(nn.Module):
         _, l_context, _ = context.shape
 
         if l_context == 77 + t*16: ## !!! HARD CODE here
+            import pdb
+            pdb.set_trace()
             context_text, context_img = context[:,:77,:], context[:,77:,:]
             context_text = context_text.repeat_interleave(repeats=t, dim=0)
             context_img = rearrange(context_img, 'b (t l) c -> (b t) l c', t=t)

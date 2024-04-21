@@ -229,6 +229,7 @@ class BasicTransformerBlock(nn.Module):
 
 
     def forward(self, x, context=None, mask=None, **kwargs):
+
         ## implementation tricks: because checkpointing doesn't support non-tensor (e.g. None or scalar) arguments
         input_tuple = (x,)      ## should not be (x), otherwise *input_tuple will decouple x into multiple arguments
         if context is not None:

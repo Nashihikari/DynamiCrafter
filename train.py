@@ -269,7 +269,7 @@ def run_inference(opt, unknown):
                         "verbose": True,
                         "save_top_k": -1,
                         "every_n_train_steps": 10000,
-                        "save_weights_only": True,
+                        "save_weights_only": False,
                     },
                 }
             }
@@ -365,7 +365,7 @@ def run_inference(opt, unknown):
 
         import signal
 
-        signal.signal(signal.SIGUSR1, melk)
+        # signal.signal(signal.SIGUSR1, melk)
         signal.signal(signal.SIGUSR2, divein)
 
         # run

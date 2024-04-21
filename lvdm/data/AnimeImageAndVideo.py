@@ -101,7 +101,7 @@ class AnimeImageAndVideo(Dataset):
         elif self.data_type == 'image':
             while True:
                 img_path = self.images[index]
-
+                image = Image.open(img_path).convert('RGB')
                 try:
                     video_reader = VideoReader(video_path, ctx=cpu(0), width=self.resolution[1], height=self.resolution[0])
                     if len(video_reader) < self.video_length:
