@@ -100,7 +100,7 @@ model:
         embedding_dim: 1280
         output_dim: 1024
         ff_mult: 4
-        video_length: 16
+        video_length: 1
 
 data:
   target: utils.dataset.DataModuleFromConfig
@@ -124,7 +124,7 @@ data:
         video_length: 16
         subset_split: test
         frame_stride: 4
-
+    
 
 lightning:
   find_unused_parameters: True
