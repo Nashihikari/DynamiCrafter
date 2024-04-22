@@ -100,7 +100,7 @@ model:
         embedding_dim: 1280
         output_dim: 1024
         ff_mult: 4
-        video_length: 1
+        video_length: 16
 
 data:
   target: utils.dataset.DataModuleFromConfig

@@ -144,56 +144,8 @@ def run_inference(opt, unknown):
         trainer_opt = argparse.Namespace(**trainer_config)
         lightning_config.trainer = trainer_config
 
-
         # model
-        
-        par_dir = {}
         model = instantiate_from_config(config.model)
-        
-        for name, param in model.named_parameters():
-            param.requires_grad_(False)
-            par_dir.update({name: param})
-        
-        child_list = []
-        for name, child in model.named_children():
-            child_list.append(name)
-
-        # diffusion model
-        dm_child_list = []
-        dm_child_list_ = []
-
-        target_modules_list=[
-            "to_k",
-            "to_q",
-            "to_v",
-            "to_out.0",
-            "proj_in",
-            "proj_out",
-            "ff.net.0.proj",
-            "ff.net.2",
-            "proj",
-            "linear",
-            "linear_1",
-            "linear_2",
-        ]
-
-        for name, child in getattr(getattr(model, 'model'), 'diffusion_model').named_parameters():
-            if 'transformer_blocks' in name:
-                for element in target_modules_list:
-                    if element in name:
-                        e_ind = name.index(element)
-                        dm_child_list.append(name[:e_ind + len(element)])
-
-        target_modules = list(set(dm_child_list))
-        lora_config = LoraConfig(
-            r=2, # 4,8, ..., args.rank
-            init_lora_weights="gaussian",
-            target_modules=target_modules
-        )
-        # pdb.set_trace()
-        model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
-        # pdb.set_trace()
 
         # trainer and callbacks
         trainer_kwargs = dict()
@@ -362,7 +314,7 @@ def run_inference(opt, unknown):
                 print(
                     f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}"
                 )
-            pdb.set_trace()
+            # pdb.set_trace()
         except:
             print("datasets not yet initialized.")
 
@@ -414,8 +366,9 @@ def run_inference(opt, unknown):
                 pudb.set_trace()
 
         import signal
-
-        # signal.signal(signal.SIGUSR1, melk)
+        
+        # !为了暂时不保存ckpt，所以注释了
+        signal.signal(signal.SIGUSR1, melk)
         signal.signal(signal.SIGUSR2, divein)
 
         # run

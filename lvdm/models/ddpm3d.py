@@ -35,6 +35,9 @@ from lvdm.common import (
     default
 )
 import random
+
+from peft import LoraConfig, get_peft_model_state_dict, get_peft_model, PeftModel
+
 import pdb
 
 __conditioning_keys__ = {'concat': 'c_concat',
@@ -87,6 +90,9 @@ class DDPM(pl.LightningModule):
         if isinstance(self.image_size, int):
             self.image_size = [self.image_size, self.image_size]
         self.use_positional_encodings = use_positional_encodings
+
+        # TODO：
+        self.enable_lora = False
         self.model = DiffusionWrapper(unet_config, conditioning_key)
         #count_params(self.model, verbose=True)
         self.use_ema = use_ema
@@ -807,7 +813,7 @@ class LatentDiffusion(DDPM):
         #     ## [b,c,t,h,w]: only care about the predicted part (avoid disturbance)
         #     model_output = model_output[:, :, self.frame_cond:, :, :]
         #     target = target[:, :, self.frame_cond:, :, :]
-        pdb.set_trace()
+        # pdb.set_trace()
 
         # choose loss type: hybrid / simple loss
         # hybrid = MSE + KL * 1/1000
@@ -1040,7 +1046,7 @@ class LatentVisualDiffusion(LatentDiffusion):
         cond = {}
         # preprocess cap_emb
         # 如果是视频的话，cap_emb是不是直接repeat frames?
-        pdb.set_trace()
+        # pdb.set_trace()
         if isinstance(cond_caption, dict) or isinstance(cond_caption, list):
             cap_emb = self.get_learned_conditioning(cond_caption) # b 77 1024
         else:
@@ -1053,7 +1059,7 @@ class LatentVisualDiffusion(LatentDiffusion):
 
         # img cond, contain 
 
-        pdb.set_trace()
+        # pdb.set_trace()
 
         if not is_imgbatch: 
             img_tensor = random_frame_copy.permute(0, 3, 1, 2).float().to(self.device) # torch.Size([2, 3, 256, 256])
@@ -1126,8 +1132,59 @@ class LatentVisualDiffusion(LatentDiffusion):
 class DiffusionWrapper(pl.LightningModule):
     def __init__(self, diff_model_config, conditioning_key):
         super().__init__()
-        self.diffusion_model = instantiate_from_config(diff_model_config)
+        self.diffusion_model = self.apply_lora(instantiate_from_config(diff_model_config), self.enable_lora)
         self.conditioning_key = conditioning_key
+
+    
+    def apply_lora(self, model, enable_lora=False):
+        if not enable_lora:
+            return model
+        
+        for name, param in model.named_parameters():
+            param.requires_grad_(False)
+
+        child_list = []
+        for name, child in model.named_children():
+            child_list.append(name)
+
+        # diffusion model
+        dm_child_list = []
+        dm_child_list_ = []
+
+        target_modules_list = [
+            "to_k",
+            "to_q",
+            "to_v",
+            "to_out.0",
+            "proj_in",
+            "proj_out",
+            "ff.net.0.proj",
+            "ff.net.2",
+            "proj",
+            "linear",
+            "linear_1",
+            "linear_2",
+        ]
+        # pdb.set_trace()
+        for name, child in model.named_parameters():
+            if 'transformer_blocks' in name:
+                for element in target_modules_list:
+                    if element in name:
+                        e_ind = name.index(element)
+                        dm_child_list.append(name[:e_ind + len(element)])
+
+        target_modules = list(set(dm_child_list))
+        lora_config = LoraConfig(
+            r=2,  # 4,8, ..., args.rank
+            init_lora_weights="gaussian",
+            target_modules=target_modules
+        )
+        pdb.set_trace()
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+        return model
+        # pdb.set_trace()
+
 
     def forward(self, x, t, c_concat: list = None, c_crossattn: list = None,
                 c_adm=None, s=None, mask=None, **kwargs):
