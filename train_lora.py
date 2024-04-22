@@ -351,6 +351,7 @@ def run_inference(opt, unknown):
         # allow checkpointing via USR1
         def melk(*args, **kwargs):
             # run all checkpoint hooks
+            pdb.set_trace()
             if trainer.global_rank == 0:
                 print("Summoning checkpoint.")
                 if melk_ckpt_name is None:
@@ -374,6 +375,7 @@ def run_inference(opt, unknown):
         # run
         if opt.train:
             try:
+                pdb.set_trace()
                 trainer.fit(model, data, ckpt_path=ckpt_resume_path)
             except Exception:
                 if not opt.debug:

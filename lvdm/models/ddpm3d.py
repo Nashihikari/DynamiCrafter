@@ -92,8 +92,8 @@ class DDPM(pl.LightningModule):
         self.use_positional_encodings = use_positional_encodings
 
         # TODO：
-        self.enable_lora = False
-        self.model = DiffusionWrapper(unet_config, conditioning_key)
+        self.enable_lora = True
+        self.model = DiffusionWrapper(unet_config, conditioning_key, self.enable_lora)
         #count_params(self.model, verbose=True)
         self.use_ema = use_ema
         self.rescale_betas_zero_snr = rescale_betas_zero_snr
@@ -1130,9 +1130,9 @@ class LatentVisualDiffusion(LatentDiffusion):
 
 
 class DiffusionWrapper(pl.LightningModule):
-    def __init__(self, diff_model_config, conditioning_key):
+    def __init__(self, diff_model_config, conditioning_key, enable_lora=False):
         super().__init__()
-        self.diffusion_model = self.apply_lora(instantiate_from_config(diff_model_config), self.enable_lora)
+        self.diffusion_model = self.apply_lora(instantiate_from_config(diff_model_config), enable_lora)
         self.conditioning_key = conditioning_key
 
     
