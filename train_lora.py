@@ -348,17 +348,32 @@ def run_inference(opt, unknown):
             print("++++ NOT USING LR SCALING ++++")
             print(f"Setting learning rate to {model.learning_rate:.2e}")
 
+        def save_lora_ckpt(model, ckpt_path_lora):
+            diffusion_model = getattr(getattr(model, 'model'), 'diffusion_model')
+            assert isinstance(diffusion_model, PeftModel), "need peftModel"
+            lora_state_dict = get_peft_model_state_dict(diffusion_model, adapter_name="default")
+            try:
+                torch.save(lora_state_dict, ckpt_path_lora)
+            except Exception as e:
+                print(f"保存模型时发生错误: {e}")
+            
+
+            
+
         # allow checkpointing via USR1
-        def melk(*args, **kwargs):
+        def melk(model=None, *args, **kwargs):
             # run all checkpoint hooks
-            pdb.set_trace()
+            # pdb.set_trace()
             if trainer.global_rank == 0:
                 print("Summoning checkpoint.")
                 if melk_ckpt_name is None:
                     ckpt_path = os.path.join(ckptdir, "last.ckpt")
+                    ckpt_path_lora = os.path.join(ckptdir, "last_lora.ckpt")
                 else:
                     ckpt_path = os.path.join(ckptdir, melk_ckpt_name)
                 trainer.save_checkpoint(ckpt_path)
+                save_lora_ckpt(model, ckpt_path_lora)
+
 
         def divein(*args, **kwargs):
             if trainer.global_rank == 0:
@@ -371,15 +386,21 @@ def run_inference(opt, unknown):
         # !为了暂时不保存ckpt，所以注释了
         signal.signal(signal.SIGUSR1, melk)
         signal.signal(signal.SIGUSR2, divein)
-
+        
+        
         # run
         if opt.train:
+            lora_layers = filter(lambda p: p.requires_grad, model.parameters())
             try:
-                pdb.set_trace()
+                # pdb.set_trace()
                 trainer.fit(model, data, ckpt_path=ckpt_resume_path)
+
+                # save lora
+
             except Exception:
+                # pdb.set_trace()
                 if not opt.debug:
-                    melk()
+                    melk(model)
                 raise
         if not opt.no_test and not trainer.interrupted:
             trainer.test(model, data)

@@ -1179,7 +1179,7 @@ class DiffusionWrapper(pl.LightningModule):
             init_lora_weights="gaussian",
             target_modules=target_modules
         )
-        pdb.set_trace()
+        # pdb.set_trace()
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
         return model
